@@ -1,0 +1,20 @@
+{
+  "name": "dsh-updater-ui",
+  "version": "1.0.0",
+  "description": "DeepSeek Harness 更新检查器：设置页一键检查/拉取 DSH 更新（git pull --ff-only），自动后台检查 + 红点提醒 + 版本对比 + 更新说明。DSH updater with one-click pull, auto-check, version diff and changelog preview.",
+  "keywords": ["dsh", "dsh-plugin", "deepseek-harness", "updater", "plugin"],
+  "license": "MIT",
+  "type": "module",
+  "main": "./host.js",
+  "exports": {
+    ".": "./host.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": ["host.js", "client.js", "cordis.patch.yml"],
+  "engines": { "node": ">=20" },
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": { "platform": "web" }
+  }
+}

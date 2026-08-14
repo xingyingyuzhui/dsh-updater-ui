@@ -1,0 +1,4 @@
+# dsh bundle layer: mount the DSH 更新检查器 (settings page + host routes).
+- insert:
+    - id: dsh-updater-ui
+      name: dsh-updater-ui
