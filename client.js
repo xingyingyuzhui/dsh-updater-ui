@@ -3,7 +3,7 @@
 // DSH web 前端通过 __ModuleLoader__ 加载本 bundle（格式同第一方 ui 包）。
 // 零外部依赖：React 由 loader 的 require 提供；检查/拉取走同源 HTTP 路由
 // （fetch('/dsh-updater/check') / fetch('/dsh-updater/pull')，由 host.js 注册）。
-// 注册设置页「DSH 更新」（settings.section），有更新时导航标签带 ● 红点。
+// 注册设置页「DSH 更新」（settings.section），有官方更新时导航标签带 ● 红点。
 window.__ModuleLoader__.load({
   id: 'dsh-updater-ui',
   factory: (require) => {
@@ -41,14 +41,24 @@ window.__ModuleLoader__.load({
       var timer = ctx.get('timer')
       if (slots === undefined) return
       var hasUpdate = false
+      var disposeInject = null
+      var headers = { 'X-DSH-Updater': '1' }
 
       var callCheck = function () {
-        return fetch('/dsh-updater/check', { method: 'POST', cache: 'no-store', signal: AbortSignal.timeout(30000) })
-          .then(function (r) { return r.json() })
+        return fetch('/dsh-updater/check', {
+          method: 'POST', headers: headers, cache: 'no-store', signal: AbortSignal.timeout(30000)
+        }).then(function (r) {
+          if (!r.ok) throw new Error('check failed: ' + r.status)
+          return r.json()
+        })
       }
       var callPull = function () {
-        return fetch('/dsh-updater/pull', { method: 'POST', cache: 'no-store', signal: AbortSignal.timeout(60000) })
-          .then(function (r) { return r.json() })
+        return fetch('/dsh-updater/pull', {
+          method: 'POST', headers: headers, cache: 'no-store', signal: AbortSignal.timeout(60000)
+        }).then(function (r) {
+          if (!r.ok) throw new Error('pull failed: ' + r.status)
+          return r.json()
+        })
       }
 
       function UpdView() {
@@ -61,7 +71,11 @@ window.__ModuleLoader__.load({
         var setPull = pull0[1]
 
         var applyData = function (data) {
-          hasUpdate = !!(data && data.ok && data.behind !== null && data.behind > 0)
+          var next = !!(data && data.ok && data.behind !== null && data.behind > 0)
+          if (next !== hasUpdate) {
+            hasUpdate = next
+            refreshInject()
+          }
         }
 
         var runCheck = function () {
@@ -107,7 +121,7 @@ window.__ModuleLoader__.load({
 
         var statusLine
         if (state.phase === 'running') {
-          statusLine = el('div', null, '正在检查更新…')
+          statusLine = el('div', null, '正在检查官方更新…')
         } else if (state.error) {
           statusLine = el('div', { style: errStyle }, '检查失败: ' + state.error)
         } else if (!state.data || !state.data.ok) {
@@ -115,38 +129,47 @@ window.__ModuleLoader__.load({
         } else {
           var d = state.data
           if (d.behind === null) {
-            statusLine = el('div', { style: warnStyle }, '无法确定远端状态' + (d.fetchFailed ? '（git fetch 失败: ' + (d.fetchError || '') + '）' : ''))
-          } else if (d.behind === 0 && d.ahead === 0) {
+            statusLine = el('div', { style: warnStyle }, '无法确定官方远端状态' + (d.fetchFailed ? '（git fetch 失败: ' + (d.fetchError || '') + '）' : ''))
+          } else if (d.behind === 0) {
             statusLine = el('div', { style: okStyle }, '✅ 已是最新版本')
-          } else if (d.behind > 0) {
+          } else {
             var verNote = ''
             if (d.remoteVersion && d.version && d.remoteVersion !== d.version) {
               verNote = '（v' + d.version + ' → v' + d.remoteVersion + '）'
             } else if (d.remoteVersion && d.remoteVersion === d.version) {
               verNote = '（版本号未变）'
             }
-            statusLine = el('div', { style: warnStyle }, '⚠️ 有更新可用：落后 ' + d.behind + ' 个提交' + verNote)
-          } else {
-            statusLine = el('div', { style: okStyle }, '与远端一致，本地领先 ' + d.ahead + ' 个提交')
+            statusLine = el('div', { style: warnStyle }, '⚠️ 有官方更新：落后 ' + d.behind + ' 个提交' + verNote)
           }
         }
 
         var pullLine = null
         if (pull !== null) {
           if (pull.phase === 'running') {
-            pullLine = el('div', null, '正在拉取更新…')
+            pullLine = el('div', null, '正在拉取官方更新…')
           } else if (pull.result && pull.result.ok) {
-            pullLine = pull.result.updated
-              ? el('div', null,
-                  el('div', { style: okStyle },
-                    '✅ 已更新: ' + (pull.result.before || '').slice(0, 8) + ' → ' + (pull.result.after || '').slice(0, 8) +
-                    (pull.result.beforeVersion && pull.result.version && pull.result.beforeVersion !== pull.result.version
-                      ? '（v' + pull.result.beforeVersion + ' → v' + pull.result.version + '）' : '')),
-                  el('div', { style: Object.assign({ marginTop: 4 }, warnStyle) },
-                    '⚠️ 新代码已拉取，重启 DSH 后更新才会生效'))
-              : el('div', { style: okStyle }, '已是最新，无需更新')
+            var dirtyNote = pull.result.dirty
+              ? el('div', { style: noteStyle }, '工作区原有 ' + pull.result.dirtyCount + ' 个未提交改动；本次未覆盖它们。')
+              : null
+            pullLine = el('div', null,
+              pull.result.updated
+                ? el('div', null,
+                    el('div', { style: okStyle },
+                      '✅ 已更新到官方最新: ' + (pull.result.before || '').slice(0, 8) + ' → ' + (pull.result.after || '').slice(0, 8) +
+                      (pull.result.beforeVersion && pull.result.version && pull.result.beforeVersion !== pull.result.version
+                        ? '（v' + pull.result.beforeVersion + ' → v' + pull.result.version + '）' : '')),
+                    el('div', { style: Object.assign({ marginTop: 4 }, warnStyle) },
+                      '⚠️ 新代码已拉取，重启 DSH 后更新才会生效'),
+                    dirtyNote)
+                : el('div', null,
+                    el('div', { style: okStyle }, '已是最新，无需更新'),
+                    dirtyNote)
+            )
           } else {
-            pullLine = el('div', { style: errStyle }, '拉取失败: ' + ((pull.result && pull.result.error) || '未知错误') + ((pull.result && pull.result.hint) ? '（' + pull.result.hint + '）' : ''))
+            pullLine = el('div', { style: errStyle },
+              '拉取失败: ' + ((pull.result && pull.result.error) || '未知错误') +
+              ((pull.result && pull.result.hint) ? '（' + pull.result.hint + '）' : '') +
+              (pull.result && pull.result.dirty ? '（工作区有 ' + pull.result.dirtyCount + ' 个未提交改动）' : ''))
           }
         }
 
@@ -156,36 +179,44 @@ window.__ModuleLoader__.load({
         if (commits.length > 0) {
           var countNote = data.behind > commits.length ? ('前 ' + commits.length + ' 条，共 ' + data.behind + ' 条') : (commits.length + ' 条')
           logBox = el('details', null,
-            el('summary', { style: { cursor: 'pointer' } }, '更新说明（' + countNote + '）'),
-            el('div', { style: { marginTop: 2 } }, commits.map(function (c) {
-              return el('div', { style: Object.assign({ marginLeft: 10 }, monoStyle) }, c)
+            el('summary', { style: { cursor: 'pointer' } }, '官方更新说明（' + countNote + '）'),
+            el('div', { style: { marginTop: 2 } }, commits.map(function (c, index) {
+              return el('div', { key: c + '-' + index, style: Object.assign({ marginLeft: 10 }, monoStyle) }, c)
             })))
         }
 
         var pullBusy = pull !== null && pull.phase === 'running'
         return el('div', { style: cardStyle },
-          el('div', { style: { fontWeight: 600 } }, 'DSH 更新'),
+          el('div', { style: { fontWeight: 600 } }, 'DSH 官方更新'),
           statusLine,
           data && data.ok ? el('div', null,
+            row('仓库', data.repo, true),
+            row('分支', data.branch, true),
             row('本地版本', data.version, true),
-            row('远端版本', data.remoteVersion, true),
+            row('官方版本', data.remoteVersion, true),
             row('本地', (data.localCommit || '').slice(0, 8) + (data.localDate ? '  ' + data.localDate : ''), true),
-            row('远端', (data.remoteCommit || '').slice(0, 8) + (data.remoteDate ? '  ' + data.remoteDate : ''), true),
+            row('官方', (data.remoteCommit || '').slice(0, 8) + (data.remoteDate ? '  ' + data.remoteDate : ''), true),
             row('最近检查', data.checkedAt ? new Date(data.checkedAt).toLocaleTimeString() : '—')) : null,
           logBox,
           pullLine,
           el('div', { style: { display: 'flex', gap: 8, marginTop: 8, alignItems: 'center' } },
-            el('button', { style: pullBtnStyle, onClick: runPull, disabled: pullBusy }, pullBusy ? '拉取中…' : '一键拉取更新'),
+            el('button', { style: pullBtnStyle, onClick: runPull, disabled: pullBusy }, pullBusy ? '拉取中…' : '一键拉取官方更新'),
             el('button', { style: btnStyle, onClick: runCheck, disabled: state.phase === 'running' }, state.phase === 'running' ? '检查中…' : '重新检查')),
-          el('div', { style: noteStyle }, '自动检查每 30 分钟一次（页面每 60 秒刷新缓存结果）；拉取使用 git pull --ff-only，仅快进更新，本地存在未推送提交或分叉时会安全拒绝。'))
+          el('div', { style: noteStyle }, '只同步官方 deepseek-ai/deepseek-harness；自动检查每 30 分钟一次（页面每 60 秒刷新缓存结果）；拉取使用 git pull --ff-only，仅快进，不会覆盖本地改动。'))
       }
 
-      var disposeInject = slots.inject('settings.section', function () {
-        return slots.register(
-          { name: 'settings.section', id: 'dsh-update', order: 30, label: function () { return hasUpdate ? 'DSH 更新 ●' : 'DSH 更新' } },
-          function (props) { return React.createElement(UpdView, null) })
-      })
-      ctx.effect(function () { return function () { disposeInject() } })
+      var refreshInject = function () {
+        if (disposeInject) disposeInject()
+        disposeInject = slots.inject('settings.section', function () {
+          return slots.register(
+            { name: 'settings.section', id: 'dsh-update', order: 30, label: function () { return hasUpdate ? 'DSH 更新 ●' : 'DSH 更新' } },
+            function (props) { return React.createElement(UpdView, null) }
+          )
+        })
+      }
+
+      refreshInject()
+      ctx.effect(function () { return function () { if (disposeInject) disposeInject() } })
     }
 
     exports.name = name
