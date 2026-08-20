@@ -1,8 +1,9 @@
 // dsh-updater-ui —— Client 面（浏览器 bundle）
 //
 // DSH web 前端通过 __ModuleLoader__ 加载本 bundle（格式同第一方 ui 包）。
-// 零外部依赖：React 由 loader 的 require 提供；检查/拉取走同源 HTTP 路由
+// 零外部依赖：React 由 loader 的 require 提供；检查/更新走同源 HTTP 路由
 // （fetch('/dsh-updater/check') / fetch('/dsh-updater/pull')，由 host.js 注册）。
+// npm/npx 安装显示 registry 版本；源码安装显示 git 提交。
 // 注册设置页「DSH 更新」（settings.section），有官方更新时导航标签带 ● 红点。
 window.__ModuleLoader__.load({
   id: 'dsh-updater-ui',
@@ -54,11 +55,19 @@ window.__ModuleLoader__.load({
       }
       var callPull = function () {
         return fetch('/dsh-updater/pull', {
-          method: 'POST', headers: headers, cache: 'no-store', signal: AbortSignal.timeout(60000)
+          method: 'POST', headers: headers, cache: 'no-store', signal: AbortSignal.timeout(120000)
         }).then(function (r) {
           if (!r.ok) throw new Error('pull failed: ' + r.status)
           return r.json()
         })
+      }
+
+      var kindLabel = function (kind) {
+        if (kind === 'npx') return 'npm（npx）'
+        if (kind === 'global') return 'npm（全局）'
+        if (kind === 'source') return '源码仓库'
+        if (kind === 'npm') return 'npm'
+        return kind || '—'
       }
 
       function UpdView() {
@@ -129,9 +138,13 @@ window.__ModuleLoader__.load({
         } else {
           var d = state.data
           if (d.behind === null) {
-            statusLine = el('div', { style: warnStyle }, '无法确定官方远端状态' + (d.fetchFailed ? '（git fetch 失败: ' + (d.fetchError || '') + '）' : ''))
+            var why = d.channel === 'npm' ? 'npm registry' : 'git fetch'
+            statusLine = el('div', { style: warnStyle }, '无法确定官方远端状态' + (d.fetchFailed ? '（' + why + ' 失败: ' + (d.fetchError || '') + '）' : ''))
           } else if (d.behind === 0) {
             statusLine = el('div', { style: okStyle }, '✅ 已是最新版本')
+          } else if (d.channel === 'npm') {
+            statusLine = el('div', { style: warnStyle },
+              '⚠️ 有官方更新：v' + (d.version || '?') + ' → v' + (d.remoteVersion || '?'))
           } else {
             var verNote = ''
             if (d.remoteVersion && d.version && d.remoteVersion !== d.version) {
@@ -146,30 +159,47 @@ window.__ModuleLoader__.load({
         var pullLine = null
         if (pull !== null) {
           if (pull.phase === 'running') {
-            pullLine = el('div', null, '正在拉取官方更新…')
+            pullLine = el('div', null, (state.data && state.data.channel === 'npm') ? '正在更新官方 npm 包…' : '正在拉取官方更新…')
           } else if (pull.result && pull.result.ok) {
             var dirtyNote = pull.result.dirty
               ? el('div', { style: noteStyle }, '工作区原有 ' + pull.result.dirtyCount + ' 个未提交改动；本次未覆盖它们。')
               : null
-            pullLine = el('div', null,
-              pull.result.updated
-                ? el('div', null,
-                    el('div', { style: okStyle },
-                      '✅ 已更新到官方最新: ' + (pull.result.before || '').slice(0, 8) + ' → ' + (pull.result.after || '').slice(0, 8) +
-                      (pull.result.beforeVersion && pull.result.version && pull.result.beforeVersion !== pull.result.version
-                        ? '（v' + pull.result.beforeVersion + ' → v' + pull.result.version + '）' : '')),
-                    el('div', { style: Object.assign({ marginTop: 4 }, warnStyle) },
-                      '⚠️ 新代码已拉取，重启 DSH 后更新才会生效'),
-                    dirtyNote)
-                : el('div', null,
-                    el('div', { style: okStyle }, '已是最新，无需更新'),
-                    dirtyNote)
-            )
+            var restartNote = pull.result.needsRestart
+              ? el('div', { style: Object.assign({ marginTop: 4 }, warnStyle) }, '⚠️ 新代码已就绪，重启 DSH 后更新才会生效')
+              : null
+            var cmdNote = pull.result.command
+              ? el('div', { style: Object.assign({ marginTop: 4 }, monoStyle) }, pull.result.command)
+              : null
+            if (pull.result.channel === 'npm' && !pull.result.updated) {
+              pullLine = el('div', null,
+                el('div', { style: okStyle }, pull.result.hint || '请用下面的命令重启到官方最新'),
+                cmdNote)
+            } else if (pull.result.updated) {
+              var range = pull.result.channel === 'npm'
+                ? ((pull.result.beforeVersion && pull.result.version && pull.result.beforeVersion !== pull.result.version)
+                  ? ('v' + pull.result.beforeVersion + ' → v' + pull.result.version)
+                  : ('v' + (pull.result.version || pull.result.remoteVersion || '')))
+                : ((pull.result.before || '').slice(0, 8) + ' → ' + (pull.result.after || '').slice(0, 8) +
+                  (pull.result.beforeVersion && pull.result.version && pull.result.beforeVersion !== pull.result.version
+                    ? '（v' + pull.result.beforeVersion + ' → v' + pull.result.version + '）' : ''))
+              pullLine = el('div', null,
+                el('div', { style: okStyle }, '✅ 已更新到官方最新: ' + range),
+                restartNote,
+                dirtyNote)
+            } else {
+              pullLine = el('div', null,
+                el('div', { style: okStyle }, '已是最新，无需更新'),
+                dirtyNote)
+            }
           } else {
             pullLine = el('div', { style: errStyle },
-              '拉取失败: ' + ((pull.result && pull.result.error) || '未知错误') +
+              '更新失败: ' + ((pull.result && pull.result.error) || '未知错误') +
               ((pull.result && pull.result.hint) ? '（' + pull.result.hint + '）' : '') +
               (pull.result && pull.result.dirty ? '（工作区有 ' + pull.result.dirtyCount + ' 个未提交改动）' : ''))
+            if (pull.result && pull.result.command) {
+              pullLine = el('div', null, pullLine,
+                el('div', { style: Object.assign({ marginTop: 4 }, monoStyle) }, pull.result.command))
+            }
           }
         }
 
@@ -186,23 +216,43 @@ window.__ModuleLoader__.load({
         }
 
         var pullBusy = pull !== null && pull.phase === 'running'
+        var isNpm = !!(data && data.channel === 'npm')
+        var meta = null
+        if (data && data.ok) {
+          meta = isNpm
+            ? el('div', null,
+                row('安装方式', kindLabel(data.kind)),
+                row('安装路径', data.install || data.repo, true),
+                row('本地版本', data.version, true),
+                row('官方版本', data.remoteVersion, true),
+                data.command ? row('更新命令', data.command, true) : null,
+                row('最近检查', data.checkedAt ? new Date(data.checkedAt).toLocaleTimeString() : '—'))
+            : el('div', null,
+                row('安装方式', '源码仓库'),
+                row('仓库', data.repo, true),
+                row('分支', data.branch, true),
+                row('本地版本', data.version, true),
+                row('官方版本', data.remoteVersion, true),
+                row('本地', (data.localCommit || '').slice(0, 8) + (data.localDate ? '  ' + data.localDate : ''), true),
+                row('官方', (data.remoteCommit || '').slice(0, 8) + (data.remoteDate ? '  ' + data.remoteDate : ''), true),
+                row('最近检查', data.checkedAt ? new Date(data.checkedAt).toLocaleTimeString() : '—'))
+        }
+        var note = isNpm
+          ? '当前进程来自 npm/npx，检查走官方 npm 包 @deepseek-ai/dsh，不 git pull 本机源码仓。自动检查每 30 分钟一次。更新后需重启 DSH。'
+          : '当前进程来自源码仓库，只同步官方 deepseek-ai/deepseek-harness；拉取使用 git pull --ff-only，仅快进。自动检查每 30 分钟一次。'
+        var pullLabel = pullBusy
+          ? (isNpm ? '更新中…' : '拉取中…')
+          : (isNpm ? '一键更新官方 npm 包' : '一键拉取官方更新')
         return el('div', { style: cardStyle },
           el('div', { style: { fontWeight: 600 } }, 'DSH 官方更新'),
           statusLine,
-          data && data.ok ? el('div', null,
-            row('仓库', data.repo, true),
-            row('分支', data.branch, true),
-            row('本地版本', data.version, true),
-            row('官方版本', data.remoteVersion, true),
-            row('本地', (data.localCommit || '').slice(0, 8) + (data.localDate ? '  ' + data.localDate : ''), true),
-            row('官方', (data.remoteCommit || '').slice(0, 8) + (data.remoteDate ? '  ' + data.remoteDate : ''), true),
-            row('最近检查', data.checkedAt ? new Date(data.checkedAt).toLocaleTimeString() : '—')) : null,
+          meta,
           logBox,
           pullLine,
           el('div', { style: { display: 'flex', gap: 8, marginTop: 8, alignItems: 'center' } },
-            el('button', { style: pullBtnStyle, onClick: runPull, disabled: pullBusy }, pullBusy ? '拉取中…' : '一键拉取官方更新'),
+            el('button', { style: pullBtnStyle, onClick: runPull, disabled: pullBusy }, pullLabel),
             el('button', { style: btnStyle, onClick: runCheck, disabled: state.phase === 'running' }, state.phase === 'running' ? '检查中…' : '重新检查')),
-          el('div', { style: noteStyle }, '只同步官方 deepseek-ai/deepseek-harness；自动检查每 30 分钟一次（页面每 60 秒刷新缓存结果）；拉取使用 git pull --ff-only，仅快进，不会覆盖本地改动。'))
+          el('div', { style: noteStyle }, note))
       }
 
       var refreshInject = function () {
