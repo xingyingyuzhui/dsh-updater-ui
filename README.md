@@ -35,16 +35,18 @@ dsh plugin --profile web add github:xingyingyuzhui/dsh-updater-ui
 
 ## 仓库定位
 
-插件默认操作：
+插件按顺序查找官方源码仓（不是 `~/.dsh` 数据目录）：
 
-```text
-~/deepseek-harness
-```
+1. 配置 `repo` / 环境变量 `DSH_REPO`
+2. `~/deepseek-harness`
+3. `~/.dsh/deepseek-harness`
 
-如果官方仓库在别的位置，可以通过环境变量指定：
+`~/.dsh` 是设置、插件和会话数据，不能 `git pull` 当官方源码。Windows 用户主目录是 `C:\Users\<用户名>`，因此默认源码路径是 `C:\Users\<用户名>\deepseek-harness`。
+
+如果官方仓库在别的位置：
 
 ```sh
-DSH_REPO=/path/to/deepseek-harness
+DSH_REPO=C:\path\to\deepseek-harness
 ```
 
 插件会校验该目录：

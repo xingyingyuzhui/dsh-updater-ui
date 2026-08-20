@@ -14,7 +14,20 @@ import { delimiter, join } from 'node:path'
 export const name = 'dsh-updater-ui'
 export const inject = ['timer', 'webServer']
 
-const DEFAULT_REPO = join(homedir(), 'deepseek-harness')
+const defaultDshHome = (env = process.env, home = homedir()) =>
+  env.DSH_HOME || join(home, '.dsh')
+
+const repoCandidates = (env = process.env, home = homedir(), configRepo) => {
+  const out = []
+  const add = (p) => {
+    if (p && out.indexOf(p) < 0) out.push(p)
+  }
+  add(configRepo)
+  add(env.DSH_REPO)
+  add(join(home, 'deepseek-harness'))
+  add(join(defaultDshHome(env, home), 'deepseek-harness'))
+  return out
+}
 const OFFICIAL_REMOTE_PATTERN = /(?:^|[/@:])deepseek-ai\/deepseek-harness(?:\.git)?$/i
 const SAFE_GIT_REF = /^[A-Za-z0-9._\-/]+$/
 const GIT_TIMEOUT_MS = 30000
@@ -131,38 +144,47 @@ export function apply(ctx, config = {}) {
   let checking = false
   let pulling = false
 
-  const repoPath = () => config.repo || process.env.DSH_REPO || DEFAULT_REPO
-
-
-
-  const resolveRepo = async () => {
-    const repo = repoPath()
-    if (!isDir(repo)) {
-      return { error: spawnGitError(resolveGitBin() || 'git', repo) }
-    }
+  const inspectRepo = async (repo) => {
+    if (!isDir(repo)) return { error: 'missing' }
     const check = await runGit(['rev-parse', '--is-inside-work-tree'], repo)
-    if (check.exitCode !== 0) {
-      return { error: `不是有效的 git 仓库: ${repo}` }
-    }
+    if (check.exitCode !== 0) return { error: 'not-git' }
     const remote = await runGit(['remote', 'get-url', 'origin'], repo)
     if (remote.exitCode !== 0 || !isOfficialRemote(remote.stdout.text.trim())) {
-      return { error: `不是官方 DeepSeek Harness 仓库，已拒绝操作: ${repo}` }
+      return { error: 'not-official' }
     }
-    const branchRes = await runGit(['symbolic-ref', '--short', 'HEAD'], repo)
-    if (branchRes.exitCode !== 0) {
-      return { error: '无法读取当前分支（可能处于 detached HEAD）' }
+    return { repo, remote: remote.stdout.text.trim() }
+  }
+
+  const resolveRepo = async () => {
+    const tried = repoCandidates(process.env, homedir(), config.repo)
+    let last = null
+    for (const repo of tried) {
+      const found = await inspectRepo(repo)
+      last = { repo, found }
+      if (!found.error) {
+        const branchRes = await runGit(['symbolic-ref', '--short', 'HEAD'], repo)
+        if (branchRes.exitCode !== 0) {
+          return { error: '无法读取当前分支（可能处于 detached HEAD）: ' + repo }
+        }
+        const branch = branchRes.stdout.text.trim()
+        if (!SAFE_GIT_REF.test(branch)) {
+          return { error: '当前分支名不合法，已拒绝操作' }
+        }
+        const upstreamRes = await runGit(['rev-parse', '--abbrev-ref', '@{upstream}'], repo)
+        const upstream = upstreamRes.exitCode === 0 ? upstreamRes.stdout.text.trim() : null
+        const remoteRef = upstream && upstream.startsWith('origin/') ? upstream : 'origin/' + branch
+        if (!SAFE_GIT_REF.test(remoteRef)) {
+          return { error: '上游分支名不合法，已拒绝操作' }
+        }
+        return { repo, branch, remoteRef }
+      }
     }
-    const branch = branchRes.stdout.text.trim()
-    if (!SAFE_GIT_REF.test(branch)) {
-      return { error: '当前分支名不合法，已拒绝操作' }
+    const listed = tried.join(' ; ')
+    const hint = 'C:\\Users\\<user>\\.dsh 是 DSH 数据目录，不是官方源码。请 clone deepseek-ai/deepseek-harness，或设置 DSH_REPO 为该仓库的本地路径。'
+    if (last && last.found && last.found.error === 'not-official') {
+      return { error: '已找到目录但 origin 不是官方 deepseek-ai/deepseek-harness: ' + last.repo + '。' + hint }
     }
-    const upstreamRes = await runGit(['rev-parse', '--abbrev-ref', '@{upstream}'], repo)
-    const upstream = upstreamRes.exitCode === 0 ? upstreamRes.stdout.text.trim() : null
-    const remoteRef = upstream && upstream.startsWith('origin/') ? upstream : 'origin/' + branch
-    if (!SAFE_GIT_REF.test(remoteRef)) {
-      return { error: '上游分支名不合法，已拒绝操作' }
-    }
-    return { repo, branch, remoteRef }
+    return { error: '未找到官方 deepseek-harness git 仓库。已尝试: ' + listed + '。' + hint }
   }
 
   const readVersion = async (repo) => {
@@ -416,5 +438,7 @@ export const _internal = {
   resetGitCache() { cachedGit = undefined },
   spawnGitError,
   isDir,
+  repoCandidates,
+  defaultDshHome,
   SAFE_GIT_REF,
 }

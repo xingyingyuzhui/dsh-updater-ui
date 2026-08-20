@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { inject, _internal } from '../host.js'
 
-const { normalizeRemote, isOfficialRemote, parsePackageVersion, gitCandidatePaths, resolveGitBin, resetGitCache, spawnGitError, SAFE_GIT_REF } = _internal
+const { normalizeRemote, isOfficialRemote, parsePackageVersion, gitCandidatePaths, resolveGitBin, resetGitCache, spawnGitError, repoCandidates, defaultDshHome, SAFE_GIT_REF } = _internal
 
 test('host does not spawn node or POSIX head', async () => {
   const source = await readFile(new URL('../host.js', import.meta.url), 'utf8')
@@ -60,6 +60,16 @@ test('resolveGitBin searches PATH and common Windows Git folders', () => {
   const hit = resolveGitBin((p) => p === want, env, 'win32')
   assert.equal(hit, want)
   resetGitCache()
+})
+
+test('repoCandidates do not treat ~/.dsh as the official source clone', () => {
+  const home = 'C:\\Users\\qinlibang'
+  const env = { DSH_HOME: join(home, '.dsh') }
+  const list = repoCandidates(env, home)
+  assert.equal(defaultDshHome(env, home), join(home, '.dsh'))
+  assert.ok(list.includes(join(home, 'deepseek-harness')))
+  assert.ok(list.includes(join(home, '.dsh', 'deepseek-harness')))
+  assert.equal(list.includes(join(home, '.dsh')), false)
 })
 
 test('spawnGitError names a missing repo directory instead of blaming git', () => {
