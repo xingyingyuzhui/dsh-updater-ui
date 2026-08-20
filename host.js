@@ -6,7 +6,7 @@
 // timer 每 30 分钟自动检查并刷新缓存。
 // 零第三方依赖：只使用 Node 内置模块。
 import { execFile } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, statSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { delimiter, join } from 'node:path'
@@ -69,6 +69,14 @@ const gitCandidatePaths = (env = process.env, platform = process.platform) => {
 
 let cachedGit = undefined
 
+const isDir = (p) => {
+  try {
+    return statSync(p).isDirectory()
+  } catch {
+    return false
+  }
+}
+
 const resolveGitBin = (exists = existsSync, env = process.env, platform = process.platform) => {
   const useCache = exists === existsSync && env === process.env && platform === process.platform
   if (useCache && cachedGit !== undefined) return cachedGit
@@ -82,6 +90,13 @@ const resolveGitBin = (exists = existsSync, env = process.env, platform = proces
   }
   if (useCache) cachedGit = null
   return null
+}
+
+const spawnGitError = (gitBin, workdir) => {
+  if (workdir && !isDir(workdir)) {
+    return '仓库目录不存在: ' + workdir + '。请设置环境变量 DSH_REPO 为官方 deepseek-harness 的本地路径。'
+  }
+  return '无法在目录 ' + workdir + ' 启动 git（' + gitBin + '）。请确认该目录存在，或设置 DSH_REPO。'
 }
 
 const runGit = (args, workdir, timeoutMs) => new Promise((resolve, reject) => {
@@ -98,7 +113,7 @@ const runGit = (args, workdir, timeoutMs) => new Promise((resolve, reject) => {
     encoding: 'utf8',
   }, (error, stdout, stderr) => {
     if (error && error.code === 'ENOENT') {
-      reject(new Error('无法启动 git: ' + gitBin))
+      reject(new Error(spawnGitError(gitBin, workdir)))
       return
     }
     const timedOut = !!(error && error.killed)
@@ -122,6 +137,9 @@ export function apply(ctx, config = {}) {
 
   const resolveRepo = async () => {
     const repo = repoPath()
+    if (!isDir(repo)) {
+      return { error: spawnGitError(resolveGitBin() || 'git', repo) }
+    }
     const check = await runGit(['rev-parse', '--is-inside-work-tree'], repo)
     if (check.exitCode !== 0) {
       return { error: `不是有效的 git 仓库: ${repo}` }
@@ -396,5 +414,7 @@ export const _internal = {
   gitCandidatePaths,
   resolveGitBin,
   resetGitCache() { cachedGit = undefined },
+  spawnGitError,
+  isDir,
   SAFE_GIT_REF,
 }

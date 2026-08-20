@@ -1,9 +1,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import { inject, _internal } from '../host.js'
 
-const { normalizeRemote, isOfficialRemote, parsePackageVersion, gitCandidatePaths, resolveGitBin, resetGitCache, SAFE_GIT_REF } = _internal
+const { normalizeRemote, isOfficialRemote, parsePackageVersion, gitCandidatePaths, resolveGitBin, resetGitCache, spawnGitError, SAFE_GIT_REF } = _internal
 
 test('host does not spawn node or POSIX head', async () => {
   const source = await readFile(new URL('../host.js', import.meta.url), 'utf8')
@@ -59,6 +60,12 @@ test('resolveGitBin searches PATH and common Windows Git folders', () => {
   const hit = resolveGitBin((p) => p === want, env, 'win32')
   assert.equal(hit, want)
   resetGitCache()
+})
+
+test('spawnGitError names a missing repo directory instead of blaming git', () => {
+  const missing = join('/tmp', 'no-such-dsh-repo-' + Date.now())
+  assert.match(spawnGitError('C:\\Program Files\\Git\\cmd\\git.exe', missing), /仓库目录不存在/)
+  assert.match(spawnGitError('C:\\Program Files\\Git\\cmd\\git.exe', missing), /DSH_REPO/)
 })
 
 test('SAFE_GIT_REF rejects shell metacharacters', () => {
