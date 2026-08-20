@@ -5,11 +5,13 @@
 //   POST /dsh-updater/pull  —— 一键拉取官方更新（git pull --ff-only）
 // timer 每 30 分钟自动检查并刷新缓存。
 // 零第三方依赖：只使用 Node 内置模块。
+import { execFile } from 'node:child_process'
+import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 export const name = 'dsh-updater-ui'
-export const inject = ['shell', 'timer', 'webServer']
+export const inject = ['timer', 'webServer']
 
 const DEFAULT_REPO = join(homedir(), 'deepseek-harness')
 const OFFICIAL_REMOTE_PATTERN = /(?:^|[/@:])deepseek-ai\/deepseek-harness(?:\.git)?$/i
@@ -29,6 +31,37 @@ const normalizeRemote = (url) => {
 
 const isOfficialRemote = (url) => OFFICIAL_REMOTE_PATTERN.test(normalizeRemote(url))
 
+const parsePackageVersion = (text) => {
+  try {
+    const version = JSON.parse(String(text || '')).version
+    return typeof version === 'string' && version ? version : null
+  } catch {
+    return null
+  }
+}
+
+const runGit = (args, workdir, timeoutMs) => new Promise((resolve, reject) => {
+  execFile('git', args, {
+    cwd: workdir,
+    timeout: timeoutMs || GIT_TIMEOUT_MS,
+    maxBuffer: 131072,
+    windowsHide: true,
+    encoding: 'utf8',
+  }, (error, stdout, stderr) => {
+    if (error && error.code === 'ENOENT') {
+      reject(new Error('找不到 git，请把它加入 PATH 后再检查'))
+      return
+    }
+    const timedOut = !!(error && error.killed)
+    resolve({
+      exitCode: error ? (typeof error.code === 'number' ? error.code : 1) : 0,
+      timedOut,
+      stdout: { text: String(stdout || '') },
+      stderr: { text: String(stderr || (error && error.message) || '') },
+    })
+  })
+})
+
 export function apply(ctx, config = {}) {
   let cached = null
   let checking = false
@@ -36,29 +69,19 @@ export function apply(ctx, config = {}) {
 
   const repoPath = () => config.repo || process.env.DSH_REPO || DEFAULT_REPO
 
-  const runGit = async (command, workdir, timeoutMs) => {
-    const spec = ctx.shell.resolve({
-      command,
-      workdir,
-      timeoutMs: timeoutMs || GIT_TIMEOUT_MS,
-      stdoutMaxBytes: 131072,
-    })
-    return ctx.shell.run(spec)
-  }
-
 
 
   const resolveRepo = async () => {
     const repo = repoPath()
-    const check = await runGit('git rev-parse --is-inside-work-tree', repo)
+    const check = await runGit(['rev-parse', '--is-inside-work-tree'], repo)
     if (check.exitCode !== 0) {
       return { error: `不是有效的 git 仓库: ${repo}` }
     }
-    const remote = await runGit('git remote get-url origin', repo)
+    const remote = await runGit(['remote', 'get-url', 'origin'], repo)
     if (remote.exitCode !== 0 || !isOfficialRemote(remote.stdout.text.trim())) {
       return { error: `不是官方 DeepSeek Harness 仓库，已拒绝操作: ${repo}` }
     }
-    const branchRes = await runGit('git symbolic-ref --short HEAD', repo)
+    const branchRes = await runGit(['symbolic-ref', '--short', 'HEAD'], repo)
     if (branchRes.exitCode !== 0) {
       return { error: '无法读取当前分支（可能处于 detached HEAD）' }
     }
@@ -66,7 +89,7 @@ export function apply(ctx, config = {}) {
     if (!SAFE_GIT_REF.test(branch)) {
       return { error: '当前分支名不合法，已拒绝操作' }
     }
-    const upstreamRes = await runGit('git rev-parse --abbrev-ref @{upstream}', repo)
+    const upstreamRes = await runGit(['rev-parse', '--abbrev-ref', '@{upstream}'], repo)
     const upstream = upstreamRes.exitCode === 0 ? upstreamRes.stdout.text.trim() : null
     const remoteRef = upstream && upstream.startsWith('origin/') ? upstream : 'origin/' + branch
     if (!SAFE_GIT_REF.test(remoteRef)) {
@@ -76,37 +99,36 @@ export function apply(ctx, config = {}) {
   }
 
   const readVersion = async (repo) => {
-    const res = await runGit(
-      'node -e "console.log(JSON.parse(require(\'fs\').readFileSync(\'package.json\',\'utf8\')).version)"',
-      repo,
-    )
-    return res.exitCode === 0 ? res.stdout.text.trim() : null
+    try {
+      return parsePackageVersion(await readFile(join(repo, 'package.json'), 'utf8'))
+    } catch {
+      return null
+    }
   }
 
   const readRemoteVersion = async (repo, remoteRef) => {
-    const res = await runGit(
-      `git show ${remoteRef}:package.json | node -e "let s=\'\';process.stdin.on(\'data\',d=>s+=d).on(\'end\',()=>console.log(JSON.parse(s).version))"`,
-      repo,
-    )
-    return res.exitCode === 0 ? res.stdout.text.trim() : null
+    const res = await runGit(['show', remoteRef + ':package.json'], repo)
+    if (res.exitCode !== 0) return null
+    return parsePackageVersion(res.stdout.text)
   }
 
   const readNewCommits = async (repo, remoteRef, limit) => {
-    const res = await runGit(`git log --format=%h %s HEAD..${remoteRef} | head -${limit || 15}`, repo)
+    const n = String(limit || 15)
+    const res = await runGit(['log', '-n', n, '--format=%h %s', 'HEAD..' + remoteRef], repo)
     if (res.exitCode !== 0) return []
     return res.stdout.text.split('\n').map((s) => s.trim()).filter((s) => s.length > 0)
   }
 
   const statusOf = async (repo, remoteRef) => {
-    const local = await runGit('git rev-parse HEAD', repo)
-    const localDate = await runGit('git log -1 --format=%ci HEAD', repo)
-    const remote = await runGit(`git rev-parse --verify ${remoteRef}`, repo)
+    const local = await runGit(['rev-parse', 'HEAD'], repo)
+    const localDate = await runGit(['log', '-1', '--format=%ci', 'HEAD'], repo)
+    const remote = await runGit(['rev-parse', '--verify', remoteRef], repo)
     let behind = null
     let remoteDate = null
     if (remote.exitCode === 0) {
-      const behindRes = await runGit(`git rev-list --count HEAD..${remoteRef}`, repo)
+      const behindRes = await runGit(['rev-list', '--count', 'HEAD..' + remoteRef], repo)
       if (behindRes.exitCode === 0) behind = Number(behindRes.stdout.text.trim())
-      const remoteDateRes = await runGit(`git log -1 --format=%ci ${remoteRef}`, repo)
+      const remoteDateRes = await runGit(['log', '-1', '--format=%ci', remoteRef], repo)
       if (remoteDateRes.exitCode === 0) remoteDate = remoteDateRes.stdout.text.trim()
     }
     return {
@@ -123,7 +145,7 @@ export function apply(ctx, config = {}) {
     if (found.error) return { ok: false, error: found.error }
     const { repo, branch, remoteRef } = found
     const fetchBranch = remoteRef.replace(/^origin\//, '')
-    const fetchRes = await runGit(`git fetch origin ${fetchBranch}`, repo, FETCH_TIMEOUT_MS)
+    const fetchRes = await runGit(['fetch', 'origin', fetchBranch], repo, FETCH_TIMEOUT_MS)
     const st = await statusOf(repo, remoteRef)
     const version = await readVersion(repo)
     let remoteVersion = null
@@ -193,15 +215,15 @@ export function apply(ctx, config = {}) {
       const { repo, branch, remoteRef } = found
       const pullBranch = remoteRef.replace(/^origin\//, '')
 
-      const beforeRes = await runGit('git rev-parse HEAD', repo)
+      const beforeRes = await runGit(['rev-parse', 'HEAD'], repo)
       const before = beforeRes.exitCode === 0 ? beforeRes.stdout.text.trim() : null
       const beforeVersion = await readVersion(repo)
 
-      const dirtyRes = await runGit('git status --porcelain', repo)
+      const dirtyRes = await runGit(['status', '--porcelain'], repo)
       const dirty = dirtyRes.exitCode === 0 && dirtyRes.stdout.text.trim().length > 0
       const dirtyCount = dirty ? dirtyRes.stdout.text.trim().split('\n').length : 0
 
-      const pullRes = await runGit(`git pull --ff-only origin ${pullBranch}`, repo, PULL_TIMEOUT_MS)
+      const pullRes = await runGit(['pull', '--ff-only', 'origin', pullBranch], repo, PULL_TIMEOUT_MS)
       if (pullRes.exitCode !== 0) {
         const errText = ((pullRes.stderr && pullRes.stderr.text) || '').trim().slice(0, 400)
         const isBlocked =
@@ -220,7 +242,7 @@ export function apply(ctx, config = {}) {
           dirtyCount,
         }
       }
-      const afterRes = await runGit('git rev-parse HEAD', repo)
+      const afterRes = await runGit(['rev-parse', 'HEAD'], repo)
       const after = afterRes.exitCode === 0 ? afterRes.stdout.text.trim() : null
       const updated = before !== null && after !== null && before !== after
       const st = await statusOf(repo, remoteRef)
@@ -321,5 +343,6 @@ export function apply(ctx, config = {}) {
 export const _internal = {
   normalizeRemote,
   isOfficialRemote,
+  parsePackageVersion,
   SAFE_GIT_REF,
 }

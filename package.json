@@ -1,6 +1,6 @@
 {
   "name": "dsh-updater-ui",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "DeepSeek Harness 官方更新检查器：设置页一键检查/拉取官方仓库更新（git pull --ff-only），自动后台检查 + 红点提醒 + 版本对比 + 更新说明。只同步官方 deepseek-ai/deepseek-harness，不管理本地提交。",
   "keywords": ["dsh", "dsh-plugin", "deepseek-harness", "updater", "plugin"],
   "license": "MIT",
