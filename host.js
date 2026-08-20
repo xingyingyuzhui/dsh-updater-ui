@@ -6,9 +6,10 @@
 // timer 每 30 分钟自动检查并刷新缓存。
 // 零第三方依赖：只使用 Node 内置模块。
 import { execFile } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { delimiter, join } from 'node:path'
 
 export const name = 'dsh-updater-ui'
 export const inject = ['timer', 'webServer']
@@ -40,8 +41,56 @@ const parsePackageVersion = (text) => {
   }
 }
 
+const gitCandidatePaths = (env = process.env, platform = process.platform) => {
+  const names = platform === 'win32' ? ['git.exe', 'git.cmd'] : ['git']
+  const out = []
+  const override = env.DSH_GIT || env.GIT_PATH
+  if (override) out.push(override)
+  for (const dir of String(env.PATH || env.Path || '').split(delimiter)) {
+    if (!dir) continue
+    for (const name of names) out.push(join(dir, name))
+  }
+  if (platform === 'win32') {
+    const pf = env.ProgramFiles || 'C:\\Program Files'
+    const pf86 = env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)'
+    const local = env.LOCALAPPDATA || join(env.USERPROFILE || env.HOME || '', 'AppData', 'Local')
+    const user = env.USERPROFILE || env.HOME || ''
+    out.push(
+      join(pf, 'Git', 'cmd', 'git.exe'),
+      join(pf, 'Git', 'bin', 'git.exe'),
+      join(pf, 'Git', 'mingw64', 'bin', 'git.exe'),
+      join(pf86, 'Git', 'cmd', 'git.exe'),
+      join(local, 'Programs', 'Git', 'cmd', 'git.exe'),
+      join(user, 'scoop', 'apps', 'git', 'current', 'cmd', 'git.exe'),
+    )
+  }
+  return out.filter(Boolean)
+}
+
+let cachedGit = undefined
+
+const resolveGitBin = (exists = existsSync, env = process.env, platform = process.platform) => {
+  const useCache = exists === existsSync && env === process.env && platform === process.platform
+  if (useCache && cachedGit !== undefined) return cachedGit
+  for (const candidate of gitCandidatePaths(env, platform)) {
+    try {
+      if (exists(candidate)) {
+        if (useCache) cachedGit = candidate
+        return candidate
+      }
+    } catch { /* ignore unreadable candidates */ }
+  }
+  if (useCache) cachedGit = null
+  return null
+}
+
 const runGit = (args, workdir, timeoutMs) => new Promise((resolve, reject) => {
-  execFile('git', args, {
+  const gitBin = resolveGitBin()
+  if (!gitBin) {
+    reject(new Error('找不到 git.exe。请安装 Git for Windows，或设置环境变量 DSH_GIT 为 git.exe 的完整路径。'))
+    return
+  }
+  execFile(gitBin, args, {
     cwd: workdir,
     timeout: timeoutMs || GIT_TIMEOUT_MS,
     maxBuffer: 131072,
@@ -49,7 +98,7 @@ const runGit = (args, workdir, timeoutMs) => new Promise((resolve, reject) => {
     encoding: 'utf8',
   }, (error, stdout, stderr) => {
     if (error && error.code === 'ENOENT') {
-      reject(new Error('找不到 git，请把它加入 PATH 后再检查'))
+      reject(new Error('无法启动 git: ' + gitBin))
       return
     }
     const timedOut = !!(error && error.killed)
@@ -344,5 +393,8 @@ export const _internal = {
   normalizeRemote,
   isOfficialRemote,
   parsePackageVersion,
+  gitCandidatePaths,
+  resolveGitBin,
+  resetGitCache() { cachedGit = undefined },
   SAFE_GIT_REF,
 }

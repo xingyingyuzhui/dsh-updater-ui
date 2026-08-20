@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { inject, _internal } from '../host.js'
 
-const { normalizeRemote, isOfficialRemote, parsePackageVersion, SAFE_GIT_REF } = _internal
+const { normalizeRemote, isOfficialRemote, parsePackageVersion, gitCandidatePaths, resolveGitBin, resetGitCache, SAFE_GIT_REF } = _internal
 
 test('host does not spawn node or POSIX head', async () => {
   const source = await readFile(new URL('../host.js', import.meta.url), 'utf8')
@@ -40,6 +40,25 @@ test('parsePackageVersion reads version without spawning node', () => {
   assert.equal(parsePackageVersion('{"version":"0.1.0-rc.6"}'), '0.1.0-rc.6')
   assert.equal(parsePackageVersion('not json'), null)
   assert.equal(parsePackageVersion('{"name":"x"}'), null)
+})
+
+test('resolveGitBin searches PATH and common Windows Git folders', () => {
+  resetGitCache()
+  const env = {
+    PATH: '/usr/bin',
+    ProgramFiles: 'C:\\Program Files',
+    'ProgramFiles(x86)': 'C:\\Program Files (x86)',
+    LOCALAPPDATA: 'C:\\Users\\qin\\AppData\\Local',
+    USERPROFILE: 'C:\\Users\\qin',
+    DSH_GIT: 'D:\\tools\\git.exe',
+  }
+  const win = gitCandidatePaths(env, 'win32')
+  assert.equal(win[0], 'D:\\tools\\git.exe')
+  assert.ok(win.some((p) => /Git[/\\]cmd[/\\]git\.exe$/i.test(p)))
+  const want = win.find((p) => /Git[/\\]cmd[/\\]git\.exe$/i.test(p) && p.indexOf('Program Files') >= 0 && p.indexOf('(x86)') < 0)
+  const hit = resolveGitBin((p) => p === want, env, 'win32')
+  assert.equal(hit, want)
+  resetGitCache()
 })
 
 test('SAFE_GIT_REF rejects shell metacharacters', () => {
