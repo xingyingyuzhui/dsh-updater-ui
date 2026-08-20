@@ -114,21 +114,52 @@ const npmKindFromDir = (packageDir) => {
   return 'npm'
 }
 
+const nativeFromPosix = (posix, original) => {
+  if (String(original || '').indexOf('\\') >= 0) return String(posix || '').replace(/\//g, '\\')
+  return posix
+}
+
 const npxRootOf = (packageDir) => {
   const original = String(packageDir || '')
   const n = posixPath(original)
   const m = n.match(/^(.*\/_npx\/[^/]+)\/node_modules\/@deepseek-ai\/dsh$/i)
   if (!m) return null
-  if (original.indexOf('\\') >= 0) return m[1].replace(/\//g, '\\')
-  return m[1]
+  return nativeFromPosix(m[1], original)
 }
 
-const updateCommand = (kind, version) => {
+const globalPrefixOf = (packageDir) => {
+  const original = String(packageDir || '')
+  const n = posixPath(original)
+  const lib = n.match(/^(.*)\/lib\/node_modules\/@deepseek-ai\/dsh$/i)
+  if (lib) return nativeFromPosix(lib[1], original)
+  const flat = n.match(/^(.*)\/node_modules\/@deepseek-ai\/dsh$/i)
+  if (flat) return nativeFromPosix(flat[1], original)
+  return null
+}
+
+const quoteArg = (value) => {
+  const s = String(value || '')
+  if (!s) return '""'
+  if (/^[A-Za-z0-9._:/\-@\\]+$/.test(s)) return s
+  return '"' + s.replace(/"/g, '\\"') + '"'
+}
+
+const updateCommand = (kind, version, prefix) => {
   const spec = version && SAFE_NPM_VERSION.test(version)
     ? OFFICIAL_NPM_PKG + '@' + version
     : OFFICIAL_NPM_PKG + '@latest'
   if (kind === 'npx') return 'npx --yes ' + spec + ' web'
+  if (prefix) return 'npm install -g --prefix ' + quoteArg(prefix) + ' ' + spec
   return 'npm install -g ' + spec
+}
+
+const readInstallVersion = (packageDir) => {
+  if (!packageDir) return null
+  try {
+    return parsePackageVersion(readFileSync(join(packageDir, 'package.json'), 'utf8'))
+  } catch {
+    return null
+  }
 }
 
 const defaultRegistries = (env = process.env, configRegistry) => {
@@ -200,6 +231,7 @@ const classifyInstall = (startPath, io = {}) => {
     packageDir: pkg.dir,
     version: pkg.version,
     npxRoot: npxRootOf(pkg.dir),
+    prefix: globalPrefixOf(pkg.dir),
   }
 }
 
@@ -494,7 +526,7 @@ export function apply(ctx, config = {}) {
     const registries = defaultRegistries(process.env, config.registry)
     const latest = await fetchNpmLatest(registries)
     const version = install.version || null
-    const command = updateCommand(install.kind, latest.version)
+    const command = updateCommand(install.kind, latest.version, install.prefix)
     if (latest.error) {
       return {
         ok: true,
@@ -518,7 +550,8 @@ export function apply(ctx, config = {}) {
       kind: install.kind,
       repo: install.packageDir,
       install: install.packageDir,
-      command: updateCommand(install.kind, latest.version),
+      command: updateCommand(install.kind, latest.version, install.prefix),
+      prefix: install.prefix || null,
       version,
       remoteVersion: latest.version,
       registry: latest.registry,
@@ -616,33 +649,33 @@ export function apply(ctx, config = {}) {
         channel: 'npm',
         kind: install.kind,
         error: latest.error,
-        command: updateCommand(install.kind),
+        command: updateCommand(install.kind, null, install.prefix),
       }
     }
     if (!SAFE_NPM_VERSION.test(latest.version)) {
-      return { ok: false, channel: 'npm', error: '官方版本号不合法，已拒绝安装', command: updateCommand(install.kind) }
+      return { ok: false, channel: 'npm', error: '官方版本号不合法，已拒绝安装', command: updateCommand(install.kind, null, install.prefix) }
     }
     const spec = OFFICIAL_NPM_PKG + '@' + latest.version
-    const command = updateCommand(install.kind, latest.version)
-    const beforeVersion = install.version || null
+    const command = updateCommand(install.kind, latest.version, install.prefix)
+    const beforeVersion = install.version || readInstallVersion(install.packageDir)
     const args = ['install', spec, '--no-fund', '--no-audit', '--ignore-scripts']
     let cwd = undefined
     if (install.kind === 'npx' && install.npxRoot && isDir(install.npxRoot)) {
       cwd = install.npxRoot
-    } else if (install.kind === 'global' || install.kind === 'npm') {
-      args.splice(1, 0, '-g')
+    } else if (install.prefix && isDir(install.prefix)) {
+      args.splice(1, 0, '-g', '--prefix', install.prefix)
     } else {
       return {
-        ok: true,
+        ok: false,
         channel: 'npm',
         kind: install.kind,
         updated: false,
-        needsRestart: true,
         beforeVersion,
-        version: latest.version,
+        version: beforeVersion,
         remoteVersion: latest.version,
         command,
-        hint: '当前 npm 安装无法在进程内替换，请停止 DSH 后运行该命令。',
+        error: '无法确定当前 DSH 的 npm prefix',
+        hint: '请停止 DSH 后运行该命令。',
       }
     }
     const npmRes = await runNpm(args, cwd, NPM_INSTALL_TIMEOUT_MS)
@@ -656,25 +689,38 @@ export function apply(ctx, config = {}) {
         hint: '正在运行的 DSH 可能锁住了安装目录。请先停止 DSH，再运行: ' + command,
         command,
         beforeVersion,
-        version: latest.version,
+        version: readInstallVersion(install.packageDir) || beforeVersion,
       }
     }
-    const after = classifyInstall(process.argv[1])
-    const afterVersion = after.version || latest.version
-    const updated = !beforeVersion || compareVersion(beforeVersion, afterVersion) < 0 || beforeVersion !== afterVersion
+    const afterVersion = readInstallVersion(install.packageDir)
+    if (!afterVersion || compareVersion(afterVersion, latest.version) !== 0) {
+      return {
+        ok: false,
+        channel: 'npm',
+        kind: install.kind,
+        error: 'npm 装到了别的目录。正在运行的仍是 ' + (afterVersion || '未知') + '，官方是 ' + latest.version,
+        hint: 'Homebrew / 多 Node 并存时必须带 --prefix 装到当前安装路径。请运行: ' + command,
+        command,
+        beforeVersion,
+        version: afterVersion,
+        remoteVersion: latest.version,
+      }
+    }
+    const updated = !beforeVersion || beforeVersion !== afterVersion
     const result = {
       ok: true,
       channel: 'npm',
       kind: install.kind,
       repo: install.packageDir,
       install: install.packageDir,
+      prefix: install.prefix || null,
       command,
       beforeVersion,
       version: afterVersion,
       remoteVersion: latest.version,
-      updated: updated || beforeVersion !== latest.version,
-      needsRestart: true,
-      behind: afterVersion && latest.version && compareVersion(afterVersion, latest.version) < 0 ? 1 : 0,
+      updated,
+      needsRestart: updated,
+      behind: 0,
     }
     const now = Date.now()
     cached = { data: { ...result, checkedAt: now }, at: now }
@@ -834,6 +880,8 @@ export const _internal = {
   compareVersion,
   npmKindFromDir,
   npxRootOf,
+  globalPrefixOf,
+  quoteArg,
   updateCommand,
   defaultRegistries,
   latestUrl,

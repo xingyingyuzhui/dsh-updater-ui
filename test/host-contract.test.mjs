@@ -8,7 +8,7 @@ import { inject, _internal } from '../host.js'
 
 const {
   normalizeRemote, isOfficialRemote, parsePackageVersion, compareVersion,
-  npmKindFromDir, npxRootOf, updateCommand, defaultRegistries, latestUrl,
+  npmKindFromDir, npxRootOf, globalPrefixOf, updateCommand, defaultRegistries, latestUrl,
   classifyInstall, gitCandidatePaths, npmCandidatePaths, resolveGitBin, resolveNpmBin,
   resetGitCache, resetNpmCache, spawnGitError, repoCandidates, defaultDshHome,
   SAFE_GIT_REF, SAFE_NPM_VERSION,
@@ -116,9 +116,28 @@ test('npmKindFromDir and npxRootOf distinguish npx vs global', () => {
   )
 })
 
+test('globalPrefixOf targets the running install, not default npm prefix', () => {
+  assert.equal(
+    globalPrefixOf('/opt/homebrew/Cellar/node@24/24.18.0/lib/node_modules/@deepseek-ai/dsh'),
+    '/opt/homebrew/Cellar/node@24/24.18.0',
+  )
+  assert.equal(
+    globalPrefixOf('/opt/homebrew/lib/node_modules/@deepseek-ai/dsh'),
+    '/opt/homebrew',
+  )
+  assert.equal(
+    globalPrefixOf('C:\\Users\\qin\\AppData\\Roaming\\npm\\node_modules\\@deepseek-ai\\dsh'),
+    'C:\\Users\\qin\\AppData\\Roaming\\npm',
+  )
+})
+
 test('updateCommand never interpolates untrusted names', () => {
   assert.equal(updateCommand('npx', '0.1.0-rc.7'), 'npx --yes @deepseek-ai/dsh@0.1.0-rc.7 web')
   assert.equal(updateCommand('global', '0.1.0-rc.7'), 'npm install -g @deepseek-ai/dsh@0.1.0-rc.7')
+  assert.equal(
+    updateCommand('global', '0.1.0-rc.7', '/opt/homebrew/Cellar/node@24/24.18.0'),
+    'npm install -g --prefix /opt/homebrew/Cellar/node@24/24.18.0 @deepseek-ai/dsh@0.1.0-rc.7',
+  )
   assert.equal(updateCommand('npx', '0.1.0; rm -rf /'), 'npx --yes @deepseek-ai/dsh@latest web')
   assert.equal(SAFE_NPM_VERSION.test('0.1.0-rc.7'), true)
   assert.equal(SAFE_NPM_VERSION.test('0.1.0;rm'), false)
@@ -164,6 +183,7 @@ test('classifyInstall detects npm global, npx, and source layouts', async () => 
     assert.equal(globalHit.channel, 'npm')
     assert.equal(globalHit.kind, 'global')
     assert.equal(globalHit.version, '0.1.0-rc.6')
+    assert.equal(globalHit.prefix, root)
 
     const npxPkg = join(root, '_npx', 'hash', 'node_modules', '@deepseek-ai', 'dsh')
     await mkdir(npxPkg, { recursive: true })

@@ -1,6 +1,6 @@
 {
   "name": "dsh-updater-ui",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "DeepSeek Harness 官方更新检查器：按当前进程安装方式检查官方更新。源码走 git pull --ff-only；npx/npm 全局走 npm registry。自动后台检查 + 红点提醒 + 版本对比。",
   "keywords": ["dsh", "dsh-plugin", "deepseek-harness", "updater", "plugin"],
   "license": "MIT",
