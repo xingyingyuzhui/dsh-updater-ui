@@ -414,6 +414,20 @@ const execFileOpts = (bin, extra, platform = process.platform) => {
 
 const quoteWinCmdArg = (value) => '"' + String(value ?? '').replace(/"/g, '""') + '"'
 
+// cmd /s strips the outermost quotes after /c. Wrap the already-quoted
+// command once more, and keep those quotes verbatim so Node does not
+// turn them into \".
+const winCmdSpawn = (bin, args, extra, env = process.env) => {
+  const inner = [bin].concat(Array.isArray(args) ? args : []).map(quoteWinCmdArg).join(' ')
+  const opts = extra && typeof extra === 'object' ? { ...extra } : {}
+  opts.windowsVerbatimArguments = true
+  return {
+    file: env.ComSpec || 'cmd.exe',
+    argv: ['/d', '/s', '/c', '"' + inner + '"'],
+    opts,
+  }
+}
+
 const spawnWinShellError = (bin) =>
   '无法启动 ' + bin + '（spawn EINVAL）。Node ≥ 20.12.2 不能直接启动 .cmd/.bat。'
 
@@ -464,8 +478,10 @@ const runNpm = (args, workdir, timeoutMs) => new Promise((resolve, reject) => {
   let file = launch.file
   let argv = launch.argv.concat(args)
   if (launch.via === 'cmd') {
-    file = process.env.ComSpec || 'cmd.exe'
-    argv = ['/d', '/s', '/c', [launch.file].concat(args).map(quoteWinCmdArg).join(' ')]
+    const cmd = winCmdSpawn(launch.file, args, opts)
+    file = cmd.file
+    argv = cmd.argv
+    Object.assign(opts, cmd.opts)
   }
   execFile(file, argv, opts, (error, stdout, stderr) => {
     if (error && error.code === 'ENOENT') {
@@ -986,6 +1002,7 @@ export const _internal = {
   needsWinShell,
   execFileOpts,
   quoteWinCmdArg,
+  winCmdSpawn,
   spawnWinShellError,
   resetGitCache() { cachedGit = undefined },
   resetNpmCache() { cachedNpm = undefined; cachedNpmLaunch = undefined },

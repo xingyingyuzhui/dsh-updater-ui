@@ -12,7 +12,7 @@ const {
   npmKindFromDir, npxRootOf, globalPrefixOf, updateCommand, defaultRegistries, latestUrl,
   classifyInstall, gitCandidatePaths, npmCandidatePaths, npmCliCandidatePaths,
   resolveGitBin, resolveNpmBin, resolveNpmLaunch,
-  needsWinShell, execFileOpts, quoteWinCmdArg,
+  needsWinShell, execFileOpts, quoteWinCmdArg, winCmdSpawn,
   resetGitCache, resetNpmCache, spawnGitError, repoCandidates, defaultDshHome,
   SAFE_GIT_REF, SAFE_NPM_VERSION,
 } = _internal
@@ -171,6 +171,23 @@ test('quoteWinCmdArg wraps paths that contain spaces', () => {
     '"C:\\Program Files\\nodejs\\npm.cmd"',
   )
   assert.equal(quoteWinCmdArg('a"b'), '"a""b"')
+})
+
+test('winCmdSpawn wraps the command for cmd /s and keeps quotes verbatim', () => {
+  const spawned = winCmdSpawn(
+    'C:\\Program Files\\nodejs\\npm.cmd',
+    ['install', '@deepseek-ai/dsh@1.2.3'],
+    { windowsHide: true, encoding: 'utf8' },
+    { ComSpec: 'C:\\Windows\\System32\\cmd.exe' },
+  )
+  assert.equal(spawned.file, 'C:\\Windows\\System32\\cmd.exe')
+  assert.deepEqual(spawned.argv.slice(0, 3), ['/d', '/s', '/c'])
+  assert.equal(
+    spawned.argv[3],
+    '""C:\\Program Files\\nodejs\\npm.cmd" "install" "@deepseek-ai/dsh@1.2.3""',
+  )
+  assert.equal(spawned.opts.windowsVerbatimArguments, true)
+  assert.equal(spawned.opts.windowsHide, true)
 })
 
 test('resolveNpmLaunch prefers node.exe plus npm-cli.js over npm.cmd', () => {
