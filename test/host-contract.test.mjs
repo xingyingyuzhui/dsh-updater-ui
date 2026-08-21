@@ -10,6 +10,7 @@ const {
   normalizeRemote, isOfficialRemote, parsePackageVersion, compareVersion,
   npmKindFromDir, npxRootOf, globalPrefixOf, updateCommand, defaultRegistries, latestUrl,
   classifyInstall, gitCandidatePaths, npmCandidatePaths, resolveGitBin, resolveNpmBin,
+  needsWinShell, execFileOpts,
   resetGitCache, resetNpmCache, spawnGitError, repoCandidates, defaultDshHome,
   SAFE_GIT_REF, SAFE_NPM_VERSION,
 } = _internal
@@ -148,6 +149,18 @@ test('defaultRegistries tries npmjs then npmmirror', () => {
   assert.equal(list[0], 'https://registry.npmjs.org')
   assert.ok(list.includes('https://registry.npmmirror.com'))
   assert.equal(latestUrl('https://registry.npmjs.org/'), 'https://registry.npmjs.org/@deepseek-ai/dsh/latest')
+})
+
+test('Windows .cmd/.bat need a shell; .exe does not', () => {
+  assert.equal(needsWinShell('C:\\Program Files\\nodejs\\npm.cmd', 'win32'), true)
+  assert.equal(needsWinShell('C:\\Program Files\\nodejs\\npm.CMD', 'win32'), true)
+  assert.equal(needsWinShell('D:\\tools\\git.bat', 'win32'), true)
+  assert.equal(needsWinShell('C:\\Program Files\\Git\\cmd\\git.exe', 'win32'), false)
+  assert.equal(needsWinShell('C:\\Program Files\\nodejs\\npm.cmd', 'darwin'), false)
+  assert.equal(needsWinShell('/usr/bin/npm', 'linux'), false)
+  assert.equal(execFileOpts('C:\\nodejs\\npm.cmd', { windowsHide: true }, 'win32').shell, true)
+  assert.equal(execFileOpts('C:\\Git\\cmd\\git.exe', { windowsHide: true }, 'win32').shell, undefined)
+  assert.equal(execFileOpts('/usr/bin/npm', { windowsHide: true }, 'linux').shell, undefined)
 })
 
 test('npmCandidatePaths prefers node sibling and Windows npm.cmd', () => {

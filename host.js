@@ -343,21 +343,40 @@ const npmMissingError = (platform = process.platform) => (
     : '找不到 npm。请确认 Node.js 安装完整，或设置环境变量 DSH_NPM。'
 )
 
+// Node ≥ 20.12.2 (CVE-2024-27980) rejects execFile/spawn of .cmd/.bat
+// unless shell is set. git.exe is fine; npm.cmd / git.cmd are not.
+const WIN_SHELL_EXT = /\.(?:cmd|bat|com)$/i
+const needsWinShell = (bin, platform = process.platform) =>
+  platform === 'win32' && WIN_SHELL_EXT.test(String(bin || ''))
+
+const execFileOpts = (bin, extra, platform = process.platform) => {
+  const opts = extra && typeof extra === 'object' ? { ...extra } : {}
+  if (needsWinShell(bin, platform)) opts.shell = true
+  return opts
+}
+
+const spawnWinShellError = (bin) =>
+  '无法启动 ' + bin + '（spawn EINVAL）。Node ≥ 20.12.2 不能直接启动 .cmd/.bat，需要通过 cmd 运行。'
+
 const runGit = (args, workdir, timeoutMs) => new Promise((resolve, reject) => {
   const gitBin = resolveGitBin()
   if (!gitBin) {
     reject(new Error(gitMissingError()))
     return
   }
-  execFile(gitBin, args, {
+  execFile(gitBin, args, execFileOpts(gitBin, {
     cwd: workdir,
     timeout: timeoutMs || GIT_TIMEOUT_MS,
     maxBuffer: 131072,
     windowsHide: true,
     encoding: 'utf8',
-  }, (error, stdout, stderr) => {
+  }), (error, stdout, stderr) => {
     if (error && error.code === 'ENOENT') {
       reject(new Error(spawnGitError(gitBin, workdir)))
+      return
+    }
+    if (error && error.code === 'EINVAL') {
+      reject(new Error(spawnWinShellError(gitBin)))
       return
     }
     const timedOut = !!(error && error.killed)
@@ -376,15 +395,19 @@ const runNpm = (args, workdir, timeoutMs) => new Promise((resolve, reject) => {
     reject(new Error(npmMissingError()))
     return
   }
-  execFile(npmBin, args, {
+  execFile(npmBin, args, execFileOpts(npmBin, {
     cwd: workdir || undefined,
     timeout: timeoutMs || NPM_INSTALL_TIMEOUT_MS,
     maxBuffer: 262144,
     windowsHide: true,
     encoding: 'utf8',
-  }, (error, stdout, stderr) => {
+  }), (error, stdout, stderr) => {
     if (error && error.code === 'ENOENT') {
       reject(new Error('无法启动 npm: ' + npmBin))
+      return
+    }
+    if (error && error.code === 'EINVAL') {
+      reject(new Error(spawnWinShellError(npmBin)))
       return
     }
     resolve({
@@ -891,6 +914,9 @@ export const _internal = {
   npmCandidatePaths,
   resolveGitBin,
   resolveNpmBin,
+  needsWinShell,
+  execFileOpts,
+  spawnWinShellError,
   resetGitCache() { cachedGit = undefined },
   resetNpmCache() { cachedNpm = undefined },
   spawnGitError,

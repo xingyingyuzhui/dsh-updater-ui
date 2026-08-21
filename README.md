@@ -73,7 +73,7 @@ npx --yes @deepseek-ai/dsh@latest web
 - 查询 `https://registry.npmjs.org/@deepseek-ai/dsh/latest`，失败则试 `https://registry.npmmirror.com`
 - 可用 `DSH_NPM_REGISTRY` 或 `npm_config_registry` 指定 registry
 - 全局安装按**正在运行的包路径**推导 `--prefix`（Homebrew `node@24` 的 Cellar 和 `npm prefix -g` 不是同一处）。装完会回读该路径的 `package.json`，版本没变则报失败，不假装成功
-- Windows 下 npm 可执行文件按 `DSH_NPM`、与 `node.exe` 同目录的 `npm.cmd`、常见 Node.js 安装路径查找
+- Windows 下 npm 可执行文件按 `DSH_NPM`、与 `node.exe` 同目录的 `npm.cmd`、常见 Node.js 安装路径查找。Node ≥ 20.12.2 不能直接 spawn `.cmd`，插件对 `npm.cmd` / `git.cmd` 会走 `cmd.exe`
 - 不会对 `~/.dsh` 做 npm install，也不会安装官方包以外的任何名字
 
 ## 安全设计
