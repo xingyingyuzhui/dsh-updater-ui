@@ -288,8 +288,45 @@ const npmCandidatePaths = (env = process.env, platform = process.platform, execP
   return out.filter(Boolean)
 }
 
+const npmCliFromRoot = (root) =>
+  root ? join(root, 'node_modules', 'npm', 'bin', 'npm-cli.js') : ''
+
+const npmCliCandidatePaths = (env = process.env, platform = process.platform, execPath = process.execPath) => {
+  const out = []
+  const add = (p) => {
+    if (p) out.push(p)
+  }
+  const addFromBin = (bin) => {
+    if (!bin) return
+    if (/npm-cli\.js$/i.test(bin)) add(bin)
+    add(npmCliFromRoot(dirname(bin)))
+  }
+  addFromBin(env.DSH_NPM)
+  const execDir = execPath ? dirname(execPath) : ''
+  if (execDir) {
+    add(npmCliFromRoot(execDir))
+    add(npmCliFromRoot(join(execDir, '..', 'lib')))
+    add(npmCliFromRoot(join(execDir, '..')))
+  }
+  for (const dir of String(env.PATH || env.Path || '').split(delimiter)) {
+    if (!dir) continue
+    add(npmCliFromRoot(dir))
+    add(npmCliFromRoot(join(dir, '..', 'lib')))
+  }
+  if (platform === 'win32') {
+    const pf = env.ProgramFiles || 'C:\\Program Files'
+    const pf86 = env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)'
+    const local = env.LOCALAPPDATA || join(env.USERPROFILE || env.HOME || '', 'AppData', 'Local')
+    add(npmCliFromRoot(join(pf, 'nodejs')))
+    add(npmCliFromRoot(join(pf86, 'nodejs')))
+    add(npmCliFromRoot(join(local, 'Programs', 'nodejs')))
+  }
+  return out.filter(Boolean)
+}
+
 let cachedGit = undefined
 let cachedNpm = undefined
+let cachedNpmLaunch = undefined
 
 const isDir = (p) => {
   try {
@@ -324,6 +361,32 @@ const resolveNpmBin = (exists = existsSync, env = process.env, platform = proces
   return hit
 }
 
+const resolveNpmCli = (exists = existsSync, env = process.env, platform = process.platform, execPath = process.execPath) =>
+  resolveExistingBin(npmCliCandidatePaths(env, platform, execPath), exists)
+
+// Node ≥ 20.12.2 (CVE-2024-27980) rejects execFile/spawn of .cmd/.bat
+// unless shell is set. git.exe is fine; git.cmd is not. npm is launched via
+// node.exe + npm-cli.js so we never spawn npm.cmd.
+const WIN_SHELL_EXT = /\.(?:cmd|bat|com)$/i
+const needsWinShell = (bin, platform = process.platform) =>
+  platform === 'win32' && WIN_SHELL_EXT.test(String(bin || ''))
+
+const resolveNpmLaunch = (exists = existsSync, env = process.env, platform = process.platform, execPath = process.execPath) => {
+  const useCache = exists === existsSync && env === process.env && platform === process.platform && execPath === process.execPath
+  if (useCache && cachedNpmLaunch !== undefined) return cachedNpmLaunch
+  const cli = resolveNpmCli(exists, env, platform, execPath)
+  const nodeBin = execPath || process.execPath
+  let hit = null
+  if (cli && nodeBin) {
+    hit = { file: nodeBin, argv: [cli], via: 'cli' }
+  } else {
+    const bin = resolveNpmBin(exists, env, platform, execPath)
+    if (bin) hit = { file: bin, argv: [], via: needsWinShell(bin, platform) ? 'cmd' : 'bin' }
+  }
+  if (useCache) cachedNpmLaunch = hit
+  return hit
+}
+
 const spawnGitError = (gitBin, workdir) => {
   if (workdir && !isDir(workdir)) {
     return '仓库目录不存在: ' + workdir + '。请设置环境变量 DSH_REPO 为官方 deepseek-harness 的本地路径。'
@@ -339,15 +402,9 @@ const gitMissingError = (platform = process.platform) => (
 
 const npmMissingError = (platform = process.platform) => (
   platform === 'win32'
-    ? '找不到 npm.cmd。请确认 Node.js 安装完整，或设置环境变量 DSH_NPM 为 npm.cmd 的完整路径。'
+    ? '找不到 npm-cli.js。请确认 Node.js 安装完整（node.exe 同目录应有 node_modules\\npm），或设置环境变量 DSH_NPM。'
     : '找不到 npm。请确认 Node.js 安装完整，或设置环境变量 DSH_NPM。'
 )
-
-// Node ≥ 20.12.2 (CVE-2024-27980) rejects execFile/spawn of .cmd/.bat
-// unless shell is set. git.exe is fine; npm.cmd / git.cmd are not.
-const WIN_SHELL_EXT = /\.(?:cmd|bat|com)$/i
-const needsWinShell = (bin, platform = process.platform) =>
-  platform === 'win32' && WIN_SHELL_EXT.test(String(bin || ''))
 
 const execFileOpts = (bin, extra, platform = process.platform) => {
   const opts = extra && typeof extra === 'object' ? { ...extra } : {}
@@ -355,8 +412,10 @@ const execFileOpts = (bin, extra, platform = process.platform) => {
   return opts
 }
 
+const quoteWinCmdArg = (value) => '"' + String(value ?? '').replace(/"/g, '""') + '"'
+
 const spawnWinShellError = (bin) =>
-  '无法启动 ' + bin + '（spawn EINVAL）。Node ≥ 20.12.2 不能直接启动 .cmd/.bat，需要通过 cmd 运行。'
+  '无法启动 ' + bin + '（spawn EINVAL）。Node ≥ 20.12.2 不能直接启动 .cmd/.bat。'
 
 const runGit = (args, workdir, timeoutMs) => new Promise((resolve, reject) => {
   const gitBin = resolveGitBin()
@@ -390,24 +449,31 @@ const runGit = (args, workdir, timeoutMs) => new Promise((resolve, reject) => {
 })
 
 const runNpm = (args, workdir, timeoutMs) => new Promise((resolve, reject) => {
-  const npmBin = resolveNpmBin()
-  if (!npmBin) {
+  const launch = resolveNpmLaunch()
+  if (!launch) {
     reject(new Error(npmMissingError()))
     return
   }
-  execFile(npmBin, args, execFileOpts(npmBin, {
+  const opts = {
     cwd: workdir || undefined,
     timeout: timeoutMs || NPM_INSTALL_TIMEOUT_MS,
     maxBuffer: 262144,
     windowsHide: true,
     encoding: 'utf8',
-  }), (error, stdout, stderr) => {
+  }
+  let file = launch.file
+  let argv = launch.argv.concat(args)
+  if (launch.via === 'cmd') {
+    file = process.env.ComSpec || 'cmd.exe'
+    argv = ['/d', '/s', '/c', [launch.file].concat(args).map(quoteWinCmdArg).join(' ')]
+  }
+  execFile(file, argv, opts, (error, stdout, stderr) => {
     if (error && error.code === 'ENOENT') {
-      reject(new Error('无法启动 npm: ' + npmBin))
+      reject(new Error('无法启动 npm: ' + launch.file))
       return
     }
     if (error && error.code === 'EINVAL') {
-      reject(new Error(spawnWinShellError(npmBin)))
+      reject(new Error(spawnWinShellError(launch.file)))
       return
     }
     resolve({
@@ -912,13 +978,17 @@ export const _internal = {
   findNamedPackage,
   gitCandidatePaths,
   npmCandidatePaths,
+  npmCliCandidatePaths,
   resolveGitBin,
   resolveNpmBin,
+  resolveNpmCli,
+  resolveNpmLaunch,
   needsWinShell,
   execFileOpts,
+  quoteWinCmdArg,
   spawnWinShellError,
   resetGitCache() { cachedGit = undefined },
-  resetNpmCache() { cachedNpm = undefined },
+  resetNpmCache() { cachedNpm = undefined; cachedNpmLaunch = undefined },
   spawnGitError,
   isDir,
   repoCandidates,

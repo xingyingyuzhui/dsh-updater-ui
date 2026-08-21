@@ -1,5 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { execFile } from 'node:child_process'
 import { realpathSync } from 'node:fs'
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -9,8 +10,9 @@ import { inject, _internal } from '../host.js'
 const {
   normalizeRemote, isOfficialRemote, parsePackageVersion, compareVersion,
   npmKindFromDir, npxRootOf, globalPrefixOf, updateCommand, defaultRegistries, latestUrl,
-  classifyInstall, gitCandidatePaths, npmCandidatePaths, resolveGitBin, resolveNpmBin,
-  needsWinShell, execFileOpts,
+  classifyInstall, gitCandidatePaths, npmCandidatePaths, npmCliCandidatePaths,
+  resolveGitBin, resolveNpmBin, resolveNpmLaunch,
+  needsWinShell, execFileOpts, quoteWinCmdArg,
   resetGitCache, resetNpmCache, spawnGitError, repoCandidates, defaultDshHome,
   SAFE_GIT_REF, SAFE_NPM_VERSION,
 } = _internal
@@ -163,6 +165,66 @@ test('Windows .cmd/.bat need a shell; .exe does not', () => {
   assert.equal(execFileOpts('/usr/bin/npm', { windowsHide: true }, 'linux').shell, undefined)
 })
 
+test('quoteWinCmdArg wraps paths that contain spaces', () => {
+  assert.equal(
+    quoteWinCmdArg('C:\\Program Files\\nodejs\\npm.cmd'),
+    '"C:\\Program Files\\nodejs\\npm.cmd"',
+  )
+  assert.equal(quoteWinCmdArg('a"b'), '"a""b"')
+})
+
+test('resolveNpmLaunch prefers node.exe plus npm-cli.js over npm.cmd', () => {
+  resetNpmCache()
+  const env = {
+    PATH: 'C:\\Program Files\\nodejs',
+    ProgramFiles: 'C:\\Program Files',
+    'ProgramFiles(x86)': 'C:\\Program Files (x86)',
+    LOCALAPPDATA: 'C:\\Users\\qin\\AppData\\Local',
+    USERPROFILE: 'C:\\Users\\qin',
+  }
+  const execPath = 'C:\\Program Files\\nodejs\\node.exe'
+  const candidates = npmCliCandidatePaths(env, 'win32', execPath)
+  const cli = candidates.find((p) => /nodejs[/\\]node_modules[/\\]npm[/\\]bin[/\\]npm-cli\.js$/i.test(p) && p.indexOf('(x86)') < 0)
+  assert.ok(cli)
+  const npmCmd = join(env.ProgramFiles, 'nodejs', 'npm.cmd')
+  const launch = resolveNpmLaunch((p) => p === cli || p === npmCmd, env, 'win32', execPath)
+  assert.equal(launch.via, 'cli')
+  assert.equal(launch.file, execPath)
+  assert.deepEqual(launch.argv, [cli])
+  resetNpmCache()
+})
+
+test('resolveNpmLaunch finds unix npm-cli.js next to the node prefix', () => {
+  resetNpmCache()
+  const execPath = '/opt/homebrew/opt/node@24/bin/node'
+  const env = { PATH: '/opt/homebrew/opt/node@24/bin' }
+  const candidates = npmCliCandidatePaths(env, 'darwin', execPath)
+  const cli = candidates.find((p) => p.replace(/\\/g, '/').endsWith('lib/node_modules/npm/bin/npm-cli.js'))
+  assert.ok(cli)
+  const launch = resolveNpmLaunch((p) => p === cli, env, 'darwin', execPath)
+  assert.equal(launch.via, 'cli')
+  assert.equal(launch.file, execPath)
+  assert.deepEqual(launch.argv, [cli])
+  resetNpmCache()
+})
+
+test('resolveNpmLaunch falls back to npm.cmd only when npm-cli.js is missing', () => {
+  resetNpmCache()
+  const env = {
+    PATH: 'C:\\Program Files\\nodejs',
+    ProgramFiles: 'C:\\Program Files',
+    'ProgramFiles(x86)': 'C:\\Program Files (x86)',
+    LOCALAPPDATA: 'C:\\Users\\qin\\AppData\\Local',
+    USERPROFILE: 'C:\\Users\\qin',
+  }
+  const execPath = 'C:\\Program Files\\nodejs\\node.exe'
+  const npmCmd = join(env.ProgramFiles, 'nodejs', 'npm.cmd')
+  const launch = resolveNpmLaunch((p) => p === npmCmd, env, 'win32', execPath)
+  assert.equal(launch.via, 'cmd')
+  assert.equal(launch.file, npmCmd)
+  resetNpmCache()
+})
+
 test('npmCandidatePaths prefers node sibling and Windows npm.cmd', () => {
   resetNpmCache()
   const env = {
@@ -220,4 +282,31 @@ test('classifyInstall detects npm global, npx, and source layouts', async () => 
   } finally {
     await rm(root, { recursive: true, force: true })
   }
+})
+
+test('host launches npm through resolveNpmLaunch, not a raw npm.cmd execFile', async () => {
+  const source = await readFile(new URL('../host.js', import.meta.url), 'utf8')
+  assert.match(source, /resolveNpmLaunch\(\)/)
+  assert.doesNotMatch(source, /execFile\(npmBin/)
+})
+
+const liveLaunch = (() => {
+  resetNpmCache()
+  return resolveNpmLaunch()
+})()
+
+test('local node can run npm-cli.js --version without a shell', {
+  skip: !liveLaunch || liveLaunch.via !== 'cli' ? 'npm-cli.js not found next to this node' : false,
+}, async () => {
+  const stdout = await new Promise((resolve, reject) => {
+    execFile(liveLaunch.file, liveLaunch.argv.concat(['--version']), {
+      timeout: 15000,
+      windowsHide: true,
+      encoding: 'utf8',
+    }, (error, out, err) => {
+      if (error) reject(new Error((err || error.message || '').slice(0, 400)))
+      else resolve(String(out || ''))
+    })
+  })
+  assert.match(stdout, /^\d+\.\d+/)
 })
